@@ -1,11 +1,36 @@
-# CLAUDE.md — working notes for this project
+# CLAUDE.md
 
-Resume context for the ESP32-S3 generative-art display project. Read this first
-when returning. (User stepped away mid-debug on 2026-06-01.)
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+Working notes / resume context for the ESP32-S3 generative-art display project.
+Read this first when returning.
+
+> ✅ **DISPLAY WORKS (2026-06-01).** The multi-day black-screen bug was a wrong
+> backlight pin: the board is the **1.47B**, which moves the backlight to **GPIO46**
+> (the base 1.47 uses GPIO48). With BL on 46 the color-bar test pattern renders.
+> See "RESOLVED" below. Next: build the gen-art demo (task #5).
+
+## Commands
+
+arduino-cli is not on PATH in a fresh shell — prepend machine+user PATH first:
+
+```powershell
+$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User')
+$FQBN = "esp32:esp32:esp32s3:PSRAM=disabled,FlashSize=16M,CDCOnBoot=cdc,FlashMode=qio"
+
+arduino-cli compile --fqbn $FQBN .\display_test          # build one sketch (folder name = .ino name)
+arduino-cli upload  -p COM3 --fqbn $FQBN .\display_test  # flash over COM3
+```
+
+No tests/linters — this is firmware. "Running" = flash, then read the serial
+heartbeat (see snippet below) and look at the panel. Each sketch is a separate
+Arduino project: `foo/foo.ino` builds/uploads independently.
 
 ## Project goal
 
-Generative art on the **Waveshare ESP32-S3-LCD-1.47** (1.47" ST7789, 172×320).
+Generative art on the **Waveshare ESP32-S3-LCD-1.47B** (1.47" ST7789, 172×320).
+(Confirmed by silkscreen + the official 1.47B schematic in `docs/`. This is the
+"Type B" revision, NOT the base 1.47 — the difference matters: see backlight pin.)
 CPU-computed framebuffer art at 30–60 fps; **BOOT button** cycles effects;
 RGB LED accent. User asked for "best performance" → we chose **Arduino +
 LovyanGFX** (near-C perf, DMA sprites). No GPU: "shaders" = per-pixel CPU render
@@ -17,9 +42,12 @@ for assets). SPI push at 80 MHz ≈ ~11 ms (~90 fps ceiling); real fps is bounde
 by pixel-math cost. Use double-buffered LGFX_Sprite + DMA, compute on one core
 while the other transfers.
 
-"Tilt control" the user wanted is **NOT possible out of the box** — no onboard
-IMU. Needs an external I2C IMU (QMI8658/MPU6050) on the header. Defer; use the
-BOOT button for effect-switching for now.
+"Tilt control" the user wanted **IS possible** — the **1.47B has an onboard
+QMI8658 6-axis IMU on I2C** (confirmed in the 1.47B schematic, `docs/`). The old
+note here ("no onboard IMU") was based on the base-1.47 and is WRONG for this board.
+Tilt-driven effects need no extra hardware. (Exact IMU_SDA/SCL GPIOs still TBD —
+read them off the schematic before wiring it up.) Start with the BOOT button for
+effect-switching; add tilt later.
 
 ## Hardware (all confirmed)
 
@@ -27,9 +55,16 @@ BOOT button for effect-switching for now.
 - Native USB-Serial/JTAG: **VID 0x303A / PID 0x1001**, shows up as **COM3**.
   (COM1 is an unrelated built-in port — ignore it.)
 - ST7789 172×320 IPS, RGB565.
-- **Confirmed pins:** SCLK 40, MOSI 45, CS 42, DC 41, RST 39, **BL 48 (active HIGH)**,
-  RGB LED (WS2812) 38. microSD SDMMC: CLK 14, CMD 15, D0 16, D1 18, D2 17, D3 21.
-- The official esp32 core variant `waveshare_esp32_s3_lcd_147` confirms RGB_LED=38.
+- **Confirmed pins (1.47B, from the official 1.47B schematic in `docs/`):**
+  SCLK 40, MOSI 45, CS 42, DC 41, RST 39, **BL 46 (active HIGH)**, RGB LED (WS2812) 38.
+  4-wire SPI (dedicated DC pin). microSD SDMMC: CLK 14, CMD 15, D0 16, D1 18, D2 17, D3 21.
+  - ⚠️ **BL is GPIO46 on the 1.47B, NOT 48.** Every base-1.47 source (3D-Box repo,
+    ESPP header, Waveshare's own 1.47 demo, the `waveshare_esp32_s3_lcd_147` core
+    variant) says BL=48 — that's the *base board* and was the multi-day red herring.
+    Backlight defaults OFF (10K gate pulldown), so drive GPIO46 HIGH explicitly.
+  - The 1.47B also has an onboard **QMI8658 IMU** (I2C) for tilt; pins TBD from schematic.
+- The official esp32 core variant `waveshare_esp32_s3_lcd_147` confirms RGB_LED=38
+  (shared with the 1.47B). Do NOT trust that variant for BL — it's 48 (base board).
 
 ## Toolchain / environment
 
@@ -59,58 +94,43 @@ $port.Close()
 - ✅ Sketch runs without crashing: `display_test` reaches its loop and prints a
   serial heartbeat (`alive, frame=N`). So `lcd.init()` completes.
 
-## OPEN PROBLEM: display is still black
+## RESOLVED: display was black → fixed by BL on GPIO46 (2026-06-01)
 
-The panel shows nothing across **four** attempts, even after copying a config
-from a confirmed-working project for this exact board.
+**Root cause: wrong backlight pin for this board revision.** The board is the
+**1.47B**, whose backlight MOSFET gate is on **GPIO46**; every source we'd trusted
+(3D-Box repo, ESPP header, Waveshare's 1.47 demo, the esp32 core variant) gives the
+**base-1.47** value GPIO48. With BL on the wrong pin the backlight never turned on,
+so an otherwise-correct render showed nothing. Fix: drive **GPIO46 HIGH** (active
+HIGH; defaults off via a 10K gate pulldown). Confirmed working — color-bar pattern
+renders. Authoritative pinout: `docs/ESP32-S3-LCD-1.47B_schematic.pdf`.
 
-### What we've RULED OUT
-- Pins — confirmed by 3 independent sources + Waveshare's own demo (BL=48 HIGH).
-- Crash/hang — serial proves the sketch runs and loops fine.
-- Backlight-only blink test was **a red herring**: an uninitialized ST7789 has its
-  display OFF and blocks light, so backlight alone can't show a glow. Inconclusive,
-  not a failure.
-- `spi_3wire` — fixed from `true`→`false` (this panel is 4-wire with a real DC pin).
-  This was a real bug but did NOT fix the black screen.
-- Build flags — the working reference repo
-  (`ahmadrezarazian/Waveshare_ESP32-S3-LCD1.47_3D-Box`) builds bone-stock
-  `esp32-s3-devkitm-1` with no flags. Our build is not the difference.
-- Our `display_test` LGFX class now **matches that working repo's config exactly**
-  (SPI3_HOST, 80 MHz, spi_3wire=false, memory 320×172, panel 172×320, offset_x=34,
-  invert=true, rgb_order=false, BL PWM on 48).
+**Why it took so long (lessons for next time):**
+- `lcd.init()` returns **true even when nothing is wired right** — `readable=false`
+  means LovyanGFX can't read the panel back, so it can't detect a bad bus/pinout.
+  Init success + sprite-alloc success told us nothing about the panel. Don't trust it.
+- The config being **byte-identical to a "known-working repo" was a trap** — that repo
+  is for the *base 1.47*, and the panel/SPI pins happen to be identical, so everything
+  looked right except the one pin that moved (BL). Secondary sources (search summaries,
+  even spotpear) kept conflating 1.47 / 1.47B / Touch and parroting BL=48.
+- What finally cracked it: two user observations — backlight **completely dark** (not
+  lit-but-black) + silkscreen reads **1.47B** — then reading the **1.47B schematic PDF**
+  directly (rendered to images; its text layer OCRs wrong). Lesson: for Waveshare boards,
+  go to the schematic for the exact revision; treat repo configs as hypotheses.
 
-### Last change made before user left
-Rewrote `display_test` to **redraw every frame** (was a one-shot draw in setup) with
-a live `f=` frame counter + a sweeping white line, then reflashed. Rationale: rule
-out a first-frame-lost-during-reset race. **Need user's eyes to confirm result.**
-
-### PRIORITIZED next steps (need the user watching the screen)
-1. **Confirm current state:** does the screen now show climbing color bars with an
-   incrementing `f=` counter? If yes → solved (it was the one-shot race); move to
-   gen-art demo. If still black → continue.
-2. **Lower SPI clock:** try `freq_write = 40000000`, then `26000000`. 80 MHz may be
-   marginal on this unit/cable even though it works on the reference board.
-3. **Longer/explicit reset:** some panels need a longer RST low pulse or a post-init
-   `lcd.invertDisplay(true/false)` toggle. Try toggling invert at runtime to see any
-   change.
-4. **Cross-check with a different driver** to isolate LovyanGFX: install
-   `Arduino_GFX` (`arduino-cli lib install "GFX Library for Arduino"`) and use its
-   documented ST7789 databus config for this board. If it ALSO stays black →
-   strongly implies hardware.
-5. **Hardware/variant check:** confirm the user's board is the base `1.47` and not
-   the `1.47B` (Type B) revision, which may have a different panel/pinout. Ask the
-   user to read the silkscreen / re-check the listing. Also: protective film on?
-   Try a different USB-C **data** cable; reseat anything.
-6. **Compare against the working repo's exact init** by reading more of its
-   `src/main.cpp` (it draws into an `LGFX_Sprite` and pushes it — try that exact
-   path: create a full-screen sprite, fill it, `sprite.pushSprite(0,0)`).
+**Other real fixes made along the way (keep these):**
+- Backlight is driven by plain `digitalWrite`, NOT LovyanGFX `Light_PWM`. Its LEDC path
+  is broken on esp32 core 3.x (we're on 3.3.8; LovyanGFX issue #708). To restore PWM
+  dimming later, use the core-3.x `ledcAttach(46,freq,bits)` / `ledcWrite(46,duty)` API.
+- `display_test` renders into a full-screen `LGFX_Sprite` and `pushSprite`s it (DMA),
+  the path the gen-art demo will use.
+- `spi_3wire=false` (this panel is 4-wire with a real DC pin — schematic-confirmed).
 
 ### Useful references
-- Working LovyanGFX project (this exact board, ~80 fps 3D cube):
+- **Authoritative 1.47B pinout:** `docs/ESP32-S3-LCD-1.47B_schematic.pdf` (BL=46!).
+- LovyanGFX config base (this *family*, ~80 fps 3D cube, but base-1.47 BL=48):
   `github.com/ahmadrezarazian/Waveshare_ESP32-S3-LCD1.47_3D-Box` (`src/main.cpp`).
-- TFT_eSPI discussion (confirms pins; needed HSPI port): Bodmer/TFT_eSPI #3527.
-- ESPP example page: esp-cpp.github.io/espp/ws_s3_lcd_1_47_example.html
-- Waveshare wiki: waveshare.com/wiki/ESP32-S3-LCD-1.47 (WebFetch 403s; use search).
+- LovyanGFX backlight/LEDC-on-core-3.x bug: LovyanGFX issue #708.
+- Waveshare wiki + product pages 403 on WebFetch; use the schematic PDF or search.
 
 ## Once the display works — build plan (task #5)
 

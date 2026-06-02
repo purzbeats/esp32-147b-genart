@@ -14,7 +14,7 @@ effects/"shaders" and the **RGB LED** as an accent.
 
 | Item | Detail |
 |---|---|
-| Board | Waveshare ESP32-S3-LCD-1.47 |
+| Board | Waveshare ESP32-S3-LCD-1.47**B** (Type B) |
 | MCU | ESP32-S3 (dual-core Xtensa LX7 @ 240 MHz), rev v0.2 |
 | RAM | 512 KB internal SRAM + 8 MB PSRAM (N16R8) |
 | Flash | 16 MB |
@@ -23,8 +23,9 @@ effects/"shaders" and the **RGB LED** as an accent.
 | Extras | WS2812 RGB LED (GPIO38), microSD/TF slot |
 | USB | Native USB-Serial/JTAG (VID 0x303A / PID 0x1001), enumerates as COM3 |
 
-**No onboard IMU** — "tilt control" requires an external I2C IMU (e.g. QMI8658
-or MPU6050) wired to the exposed header. Not yet attempted.
+**Onboard QMI8658 IMU** (the 1.47B has a 6-axis IMU on I2C) — so "tilt control" is
+doable with no extra hardware. Not yet wired up; exact I2C pins TBD from the schematic
+(`docs/ESP32-S3-LCD-1.47B_schematic.pdf`).
 
 ### Confirmed pin map (ST7789, 4-wire SPI)
 
@@ -35,7 +36,7 @@ or MPU6050) wired to the exposed header. Not yet attempted.
 | CS | 42 |
 | DC | 41 |
 | RST | 39 |
-| Backlight (active HIGH) | 48 |
+| Backlight (active HIGH) | **46** (1.47B; the base 1.47 uses 48 — see `CLAUDE.md`) |
 | RGB LED (WS2812) | 38 |
 
 microSD is on a dedicated SDMMC bus (CLK 14, CMD 15, D0 16, D1 18, D2 17, D3 21)
@@ -70,16 +71,18 @@ large asset buffers.)
 
 | Sketch | Purpose | Status |
 |---|---|---|
-| `display_test/` | Color-bar + frame-counter validation pattern | ⚠️ display still black — debugging |
-| `bl_test/` | Blink backlight GPIO48 only (diagnostic) | superseded |
+| `display_test/` | Color-bar + frame-counter validation pattern (sprite + DMA) | ✅ works (BL on GPIO46) |
+| `bl_test/` | Blink backlight only (diagnostic) | superseded |
 | `rgb_test/` | Cycle the WS2812 RGB LED on GPIO38 | ✅ works |
 
 ## Status
 
 - ✅ Toolchain installed; board flashes reliably over COM3
 - ✅ Chip + IO confirmed working (RGB LED cycles, serial heartbeat prints)
-- ⚠️ **Display still black** even with a config copied from a known-working
-  project for this exact board. See `CLAUDE.md` → "Open problem" for the
-  prioritized debug plan.
+- ✅ **Display works** — the long black-screen bug was the wrong backlight pin:
+  this is the **1.47B**, which puts the backlight on **GPIO46** (not 48). See
+  `CLAUDE.md` → "RESOLVED" for the full story.
+- ⏭️ Next: build the generative-art demo (plasma → flow field → …) with BOOT-button
+  effect cycling. See `CLAUDE.md` → build plan.
 
-See **`CLAUDE.md`** for the full working log, what's been ruled out, and next steps.
+See **`CLAUDE.md`** for the full working log and the build plan.
