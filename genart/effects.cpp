@@ -226,17 +226,15 @@ static void fxSand(uint16_t* buf, int w, int h, const Inputs& in, const uint16_t
     }
   }
 
-  // Reset once the settled pile reaches the top ~5% of the screen (95% full).
-  // Only count "settled" grains (something solid below) so the falling stream
-  // passing through the top rows doesn't trip the reset early.
-  int topBand = SAND_GH / 20;                                // top 5% of rows
-  int settledTop = 0;
-  for (int y = 0; y < topBand; y++)
-    for (int x = 0; x < SAND_GW; x++) {
-      int idx = y * SAND_GW + x;
-      if (sgrid[idx] && sgrid[idx + SAND_GW]) settledTop++;   // occupied with support below
-    }
-  if (settledTop > SAND_GW / 8) {
+  // Reset when the pile fills up to ~95% height. Check the single row at the 5%
+  // line and require it broadly filled (> half the width). This sits BELOW the
+  // emitter's cluster at the very top (which otherwise causes spurious early
+  // resets, especially on wide/dense-spray runs), and the narrow falling stream
+  // can't fill half a row — only the risen pile does.
+  int line = SAND_GH / 20;                                   // row at 5% from top
+  int fill = 0;
+  for (int x = 0; x < SAND_GW; x++) if (sgrid[line * SAND_GW + x]) fill++;
+  if (fill > SAND_GW / 2) {
     memset(sgrid, 0, sizeof(sgrid));
     sandNewRun();                                            // new run: palette + pattern + spray + wind
   }
