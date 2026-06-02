@@ -1,0 +1,31 @@
+# Arduino / arduino-cli build artifacts
+build/
+*.bin
+*.elf
+*.hex
+*.map
+*.partitions.bin
+*.bootloader.bin
+.build/
+*.tmp
+
+# arduino-cli local cache (if ever placed in-tree)
+.arduino15/
+
+# PlatformIO (in case we add it later)
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Logs / scratch
+*.log
+scratch/

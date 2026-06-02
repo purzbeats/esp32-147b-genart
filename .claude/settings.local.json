@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rustc --version)",
+      "PowerShell(Get-CimInstance *)",
+      "WebFetch(domain:www.waveshare.com)",
+      "WebSearch",
+      "WebFetch(domain:esp-cpp.github.io)",
+      "PowerShell($tools = 'winget','scoop','choco','git'; foreach \\($t in $tools\\) { $c = Get-Command $t -ErrorAction SilentlyContinue; if \\($c\\) { \"{0,-8} -> {1}\" -f $t, $c.Source } else { \"{0,-8} -> NOT FOUND\" -f $t } }; \"---\"; $a = Get-Command arduino-cli -ErrorAction SilentlyContinue; if \\($a\\) { \"arduino-cli already installed: $\\($a.Source\\)\" } else { \"arduino-cli -> NOT FOUND\" })",
+      "PowerShell(winget install *)",
+      "PowerShell($machine = [System.Environment]::GetEnvironmentVariable\\('Path','Machine'\\); $user = [System.Environment]::GetEnvironmentVariable\\('Path','User'\\); $env:Path = $machine + ';' + $user; $a = Get-Command arduino-cli -ErrorAction SilentlyContinue; if \\($a\\) { \"FOUND: $\\($a.Source\\)\"; arduino-cli version } else { \"still not on PATH; searching...\"; Get-ChildItem -Path 'C:\\\\Program Files','C:\\\\Program Files \\(x86\\)' -Filter arduino-cli.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 3 -ExpandProperty FullName })",
+      "PowerShell(arduino-cli *)",
+      "WebFetch(domain:github.com)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\('Path','Machine'\\) + ';' + [System.Environment]::GetEnvironmentVariable\\('Path','User'\\); $port = new-Object System.IO.Ports.SerialPort COM3,115200,None,8,one; try { $port.ReadTimeout = 1500; $port.Open\\(\\); Start-Sleep -Milliseconds 300; $sb = New-Object System.Text.StringBuilder; $deadline = \\(Get-Date\\).AddSeconds\\(4\\); while \\(\\(Get-Date\\) -lt $deadline\\) { try { $line = $port.ReadLine\\(\\); [void]$sb.AppendLine\\($line\\) } catch { } }; $port.Close\\(\\); $out = $sb.ToString\\(\\); if \\($out.Trim\\(\\)\\) { \"SERIAL OUTPUT:`n$out\" } else { \"\\(no serial lines captured in 4s window\\)\" } } catch { \"ERROR opening port: $_\" })",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\('Path','Machine'\\) + ';' + [System.Environment]::GetEnvironmentVariable\\('Path','User'\\); $port = new-Object System.IO.Ports.SerialPort COM3,115200,None,8,one; try { $port.ReadTimeout = 1500; $port.Open\\(\\); Start-Sleep -Milliseconds 300; $sb = New-Object System.Text.StringBuilder; $deadline = \\(Get-Date\\).AddSeconds\\(5\\); while \\(\\(Get-Date\\) -lt $deadline\\) { try { $line = $port.ReadLine\\(\\); [void]$sb.AppendLine\\($line\\) } catch { } }; $port.Close\\(\\); $out = $sb.ToString\\(\\); if \\($out.Trim\\(\\)\\) { \"SERIAL OUTPUT:`n$out\" } else { \"\\(no serial lines captured\\)\" } } catch { \"ERROR: $_\" })",
+      "Bash(gh api *)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git -c user.name=purz -c user.email=purz@comfy.org commit -q -m 'Initial scaffold: ESP32-S3-LCD-1.47 gen-art project *)"
+    ]
+  }
+}
