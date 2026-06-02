@@ -40,9 +40,15 @@ extern const int    NUM_EFFECTS;
 // Palettes. PALETTES holds RGB888 (built by buildTables); PAL565 holds the same
 // colors pre-converted to the panel's RGB565 (filled in setup() via lcd.color565
 // so the byte order is guaranteed correct). Effects index PAL565.
-static const int NUM_PALETTES = 3;
+// 0..2: cosine gradients used by the shaders. 3..10: curated 2-color gradients
+// used by the sand (one picked per run). See effects.cpp.
+static const int NUM_PALETTES = 11;
 extern uint8_t  PALETTES[NUM_PALETTES][256][3];
 extern uint16_t PAL565[NUM_PALETTES][256];
 
 // Build the shared sin LUT and the RGB888 palettes. Call once in setup().
 void buildTables();
+
+// Seed the simulation PRNG (call once at startup, e.g. effectsSeed(esp_random())),
+// so the randomized runs differ from boot to boot.
+void effectsSeed(uint32_t s);

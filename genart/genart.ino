@@ -78,6 +78,7 @@ void setup() {
   digitalWrite(PIN_BL, HIGH);                // backlight on (GPIO46)
 
   buildTables();
+  effectsSeed(esp_random());     // hardware RNG so randomized runs differ each boot
   // Convert the RGB888 palettes to RGB565. A 16bpp LGFX_Sprite stores pixels
   // BYTE-SWAPPED (MSB first, to match SPI), so when we write raw values to the
   // buffer we must swap too — otherwise colors rotate (pure blue 0x001F -> 0x1F00
