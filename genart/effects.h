@@ -19,21 +19,30 @@ struct Inputs {
   float ax, ay, az;
 };
 
-typedef void (*EffectFn)(uint8_t* buf, int w, int h, const Inputs& in);
+// Effects compute a 0..255 value per pixel and write `pal[value]` — a ready-made
+// RGB565 color — straight into the 16bpp framebuffer. Writing RGB565 directly (vs
+// 8-bit indices) makes the DMA push a pure blit with no per-pixel conversion, which
+// is the difference between ~55 and ~80 fps. `pal` is the 256-entry palette for the
+// active effect; effects stay palette-agnostic and recolor for free by being handed
+// a different `pal`.
+typedef void (*EffectFn)(uint16_t* buf, int w, int h, const Inputs& in, const uint16_t* pal);
 
 struct Effect {
   const char* name;
   EffectFn    fn;
-  uint8_t     palette;            // index into PALETTES
+  uint8_t     palette;            // index into PALETTES / PAL565
   uint8_t     ledR, ledG, ledB;   // RGB LED color while this effect is active
 };
 
 extern const Effect EFFECTS[];
 extern const int    NUM_EFFECTS;
 
-// Palettes: [palette][index] -> {r,g,b}. Built by buildTables().
+// Palettes. PALETTES holds RGB888 (built by buildTables); PAL565 holds the same
+// colors pre-converted to the panel's RGB565 (filled in setup() via lcd.color565
+// so the byte order is guaranteed correct). Effects index PAL565.
 static const int NUM_PALETTES = 3;
-extern uint8_t PALETTES[NUM_PALETTES][256][3];
+extern uint8_t  PALETTES[NUM_PALETTES][256][3];
+extern uint16_t PAL565[NUM_PALETTES][256];
 
-// Build the shared sin LUT and all palettes. Call once in setup().
+// Build the shared sin LUT and the RGB888 palettes. Call once in setup().
 void buildTables();
