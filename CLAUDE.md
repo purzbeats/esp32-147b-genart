@@ -7,8 +7,11 @@ Read this first when returning.
 
 > ✅ **DISPLAY WORKS (2026-06-01).** The multi-day black-screen bug was a wrong
 > backlight pin: the board is the **1.47B**, which moves the backlight to **GPIO46**
-> (the base 1.47 uses GPIO48). With BL on 46 the color-bar test pattern renders.
-> See "RESOLVED" below. Next: build the gen-art demo (task #5).
+> (the base 1.47 uses GPIO48). With BL on 46 the panel renders. See "RESOLVED" below.
+>
+> ✅ **GEN-ART APP BUILT (`genart/`, ~91 fps).** Dual-core 16bpp render pipeline at the
+> SPI ceiling; effect framework + falling-sand sim with per-run variety; BOOT cycles
+> effects. See "The app" section below. **Next: wire the onboard QMI8658 IMU for tilt.**
 
 ## Commands
 
@@ -132,17 +135,55 @@ renders. Authoritative pinout: `docs/ESP32-S3-LCD-1.47B_schematic.pdf`.
 - LovyanGFX backlight/LEDC-on-core-3.x bug: LovyanGFX issue #708.
 - Waveshare wiki + product pages 403 on WebFetch; use the schematic PDF or search.
 
-## Once the display works — build plan (task #5)
+## The app: `genart/` — architecture & learnings (built, ~91 fps)
 
-1. Full-screen `LGFX_Sprite` framebuffer in internal SRAM (RGB565).
-2. Effects as functions writing into the sprite (start: plasma via sin LUTs, then
-   Perlin/flow field, fire, reaction-diffusion).
-3. `sprite.pushSprite()` with DMA; measure fps; aim 30–60.
-4. BOOT button (GPIO0, `INPUT_PULLUP`, active LOW) debounced to cycle effects;
-   RGB LED reflects current effect.
-5. Later: microSD for presets/palettes; optional external IMU for tilt.
+Modular structure (the "standard" — adding an effect is one function + one
+`EFFECTS[]` row):
+- `board.h` — pins + verified `LGFX` panel class + `SCREEN_W/H`. Single source of
+  hardware truth; no globals (declare `LGFX lcd;` in the .ino).
+- `effects.h` / `effects.cpp` — `Inputs` struct (frame + `ax/ay/az` tilt) handed to
+  every effect; `EFFECTS[]` registry; sin LUT + palettes. Effects: `sand` (default),
+  `plasma`, `rings`, `weave`.
+- `genart.ino` — dual-core pipeline, BOOT cycling, RGB LED, fps/timing prints.
+
+### Performance learnings (40 → 55 → 91 fps; SPI-bound ceiling)
+- **Dual-core double buffer:** core 0 (pinned FreeRTOS task) renders the next frame
+  while core 1 (`loop`) DMA-pushes the ready one; buffers ping-pong via two FreeRTOS
+  queues (`freeQ`/`readyQ`). Frame time = `max(render, push)`, not the sum. (40→55.)
+- **Write RGB565 directly, not 8bpp+palette:** with 16bpp sprites the effect writes
+  `pal[idx]` (a ready 565 value) so `pushSprite` is a pure DMA blit — no per-pixel
+  palette conversion on the push core. (55→91.) Push is then ~11 ms = the raw SPI
+  transfer time for a full frame at 80 MHz = the **hard ceiling**. render ~2–10 ms.
+- **16bpp sprite byte order:** a 16bpp `LGFX_Sprite` stores pixels BYTE-SWAPPED
+  (MSB first). Raw buffer writes must swap too, or colors rotate (pure blue `0x001F`
+  → `0x1F00` shows as green). Build the 565 palette with `lcd.color565()` **then
+  byte-swap**. (The 8bpp path didn't need this — the library swapped for us.)
+- `lcd.init()` returns **true even with a wrong pinout** (`readable=false` → it can't
+  read the panel back). Init success proves nothing; don't trust it for diagnosis.
+
+### Effect/sim learnings
+- **Paletted look:** effects compute a 0..255 value; a per-effect/per-run palette LUT
+  maps it to color, so recolor is free. Curated 2-color *cyclic* gradients (triangle
+  ramp A→B→A) look classier than full-HSV rainbow.
+- **Falling sand** (`fxSand`): 86×160 grid (2px cells), bottom-up CA. Stateful via
+  file-static grid — safe because only the render task (core 0) touches it.
+  - Run physics **every frame** with each grain acting at ~50% probability → smooth
+    91 Hz motion but lazy average speed and natural scatter. Gating physics to every
+    2nd frame instead produced a visible ~45 Hz strobe on falling grains.
+  - Detect "settled" grains (occupied with support below) to (a) reset at ~95% full
+    without the falling stream tripping it, and to reason about pile height.
+  - Per-run randomization (palette, spray width/count, wind strength/freqs, emitter
+    motion pattern) keyed off a `sandNewRun()`; seed PRNG from `esp_random()` at boot.
+  - Smooth motion = sines / low-passed noise. A raw per-frame random walk reads jagged.
+
+### Roadmap
+- **IMU tilt (next):** onboard QMI8658 on I2C (pins ~IO43/IO44 — confirm SDA/SCL order
+  + addr 0x6A/0x6B from schematic; use `Wire.begin(43,44)`, lib `SensorLib 0.4.1`).
+  Feed gravity into `Inputs.ax/ay` (already plumbed) so tilt pours the sand.
+- More sims (water/walls, Game of Life), optional PWM brightness via core-3.x
+  `ledcAttach`, microSD presets.
 
 ## Conventions
-- Each sketch in its own folder (Arduino requires `foo/foo.ino`).
-- Keep the confirmed LGFX class identical across sketches (factor into a shared
-  header once the display is proven).
+- Each sketch in its own folder (Arduino requires `foo/foo.ino`). `genart/` is the app
+  (multiple files compiled together); the others are single-file diagnostics.
+- `board.h` is the shared, verified hardware config — reuse it; don't re-derive pins.
