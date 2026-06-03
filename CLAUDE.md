@@ -272,6 +272,14 @@ Modular structure (the "standard" — adding an effect is one function + one
 - More sims (water/walls, Game of Life), optional PWM brightness via core-3.x
   `ledcAttach`, microSD presets.
 
+## Helper / diagnostic sketches (single-file, alongside `genart/`)
+- **`rgb_test/`** — blinks the WS2812 on GPIO38; proves IO + pin family (LED is GRB).
+- **`display_test/`** — minimal full-screen sprite + `pushSprite` (the gen-art path);
+  used to crack the black-screen bug. Prints an `alive, frame=N` heartbeat.
+- **`bl_test/`** — backlight isolation: toggles a pin once/sec with NO display driver.
+  ⚠️ Still hardcodes the WRONG `BL_PIN 48` (base-1.47); the 1.47B is **46**. Historical
+  diagnostic — fix the pin if you reuse it.
+
 ## Conventions
 - Each sketch in its own folder (Arduino requires `foo/foo.ino`). `genart/` is the app
   (multiple files compiled together); the others are single-file diagnostics.
