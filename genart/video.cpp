@@ -13,7 +13,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-#define MAX_CLIPS 16
+#define MAX_CLIPS 64
 #define MAX_JPEG  (48 * 1024)        // per-frame JPEG ceiling (172x320 @ q7 is ~10-30KB)
 
 static char  s_paths[MAX_CLIPS][80];
