@@ -120,14 +120,14 @@
       <input type="range" id="csize" min="10" max="100" value="100" style="flex:1">
     </div>
     <div class="ctl"><label>Frame rate (fps)</label>
-      <input type="number" id="fps" value="20" min="1" max="40" step="1"></div>
+      <input type="number" id="fps" value="24" min="1" max="40" step="1"></div>
     <div class="ctl"><label>JPEG quality <span class="muted">(2 best · 31 worst)</span></label>
       <input type="number" id="q" value="7" min="2" max="31" step="1"></div>
     <div class="ctl"><label>Downscale filter</label>
       <select id="filter">
+        <option value="neighbor" selected>Nearest (blocky)</option>
         <option value="lanczos">Lanczos (sharp)</option>
         <option value="bilinear">Bilinear (soft)</option>
-        <option value="neighbor">Nearest (blocky)</option>
       </select>
     </div>
     <div class="ctl"><label>Preview zoom</label>
@@ -333,7 +333,7 @@ function buildCmd(){
   layoutTimeline();
   const c=S.crop;
   const cx=Math.round(c.x), cy=Math.round(c.y), cw=Math.round(c.w), ch=Math.round(c.h);
-  const fps=+document.getElementById('fps').value||20;
+  const fps=+document.getElementById('fps').value||24;
   const q=+document.getElementById('q').value||7;
   const filt=document.getElementById('filter').value;
   const flags = filt==='neighbor'?'neighbor':filt;        // lanczos|bilinear|neighbor
