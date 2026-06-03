@@ -16,6 +16,15 @@
 #define PIN_BTN  0    // BOOT button, active LOW (use INPUT_PULLUP)
 #define PIN_RGB  38   // onboard WS2812 RGB LED
 
+// microSD on the SDMMC bus (4-bit). Used by the video player; no conflict with the
+// LCD's SPI3 pins (40/45/42/41/39) or BL/RGB/BTN.
+#define PIN_SD_CLK 14
+#define PIN_SD_CMD 15
+#define PIN_SD_D0  16
+#define PIN_SD_D1  18
+#define PIN_SD_D2  17
+#define PIN_SD_D3  21
+
 // --- Screen ---------------------------------------------------------------------
 // 172 is divisible by 4, so an 8bpp sprite has stride == width (no row padding).
 static const int SCREEN_W = 172;

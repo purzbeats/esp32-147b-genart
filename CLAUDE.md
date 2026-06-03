@@ -68,6 +68,29 @@ effect-switching; add tilt later.
   - The 1.47B also has an onboard **QMI8658 IMU** (I2C) for tilt; pins TBD from schematic.
 - The official esp32 core variant `waveshare_esp32_s3_lcd_147` confirms RGB_LED=38
   (shared with the 1.47B). Do NOT trust that variant for BL — it's 48 (base board).
+- **Board outline: 36.37 × 20.32 mm** (≈1.43″ × 0.80″), USB-C overhangs one end.
+  Headers are 2.54 mm pitch; left edge exposes `BAT`/`G`, right edge `3V3`/`G`/`VBUS`.
+
+### Battery / power (confirmed from schematic + board photo, 2026-06-02)
+- **Decision (2026-06-02): powered over the USB-C cable for now** — no cell soldered.
+  Simplest, no polarity/auto-shutoff risk. The onboard charging hardware below is
+  documented for if we ever want it cordless later.
+- **Onboard LiPo charging is fully present** — no add-on board needed, just a cell.
+  - **`ETA6098`** single-cell Li-ion/LiPo charger with power-path: charges from USB
+    `VBUS`, auto-switches the system to battery when USB is unplugged.
+  - **`CHG`** silkscreen + LED near the USB-C = charge-status indicator.
+  - **`BAT_ADC`** net: battery voltage is wired to an ADC pin for a fuel gauge (TODO:
+    confirm which GPIO from the schematic; pairs naturally with the IMU work).
+- **No battery connector is populated** — the cell connects via the **`BAT` and `G`
+  through-hole pads** on the left header (`BAT` = battery +, adjacent `G` = −). So a
+  battery is *soldered on* (or solder a JST pigtail to `BAT`/`G` for a removable cell).
+- ⚠️ **Polarity is unprotected** — bare pads, no keyed plug. Reverse voltage into `BAT`
+  feeds the charger/power-path and can kill the board. **Meter the cell leads first;**
+  don't trust wire colors on cheap LiPos.
+- **Cell:** 1S 3.7 V LiPo. Footprint-matched size = **502035** (5×20×35 mm). Current
+  build uses a 502035 **330 mAh** → ~2–2.5 h runtime (board draws ~120–160 mA active,
+  WiFi/BT off). Charges in <1 h; if the cell warms during charge, the ETA6098's fixed
+  charge current is just a bit brisk for a 330 mAh cell (harmless).
 
 ## Toolchain / environment
 
@@ -146,10 +169,18 @@ Modular structure (the "standard" — adding an effect is one function + one
   `plasma`, `rings`, `weave`.
 - `genart.ino` — dual-core pipeline, BOOT cycling, RGB LED, fps/timing prints.
 
+**Reading order for a new instance:** `board.h` (hardware truth) → `effects.h`
+(the effect contract: `Inputs`, `EffectFn`, `Effect`/`EFFECTS[]`) → `effects.cpp`
+(effects + the sand sim) → `genart.ino` (the pipeline that ties it together).
+
 ### Performance learnings (40 → 55 → 91 fps; SPI-bound ceiling)
 - **Dual-core double buffer:** core 0 (pinned FreeRTOS task) renders the next frame
   while core 1 (`loop`) DMA-pushes the ready one; buffers ping-pong via two FreeRTOS
   queues (`freeQ`/`readyQ`). Frame time = `max(render, push)`, not the sum. (40→55.)
+  - **Invariant:** exactly **2** buffers, both seeded into `freeQ` at startup, and
+    both queues are **depth 2**. Render pulls from `freeQ`→pushes to `readyQ`; loop
+    does the reverse. Don't change the buffer count or queue depth independently —
+    they must match or the pipeline stalls/overruns.
 - **Write RGB565 directly, not 8bpp+palette:** with 16bpp sprites the effect writes
   `pal[idx]` (a ready 565 value) so `pushSprite` is a pure DMA blit — no per-pixel
   palette conversion on the push core. (55→91.) Push is then ~11 ms = the raw SPI
@@ -180,6 +211,64 @@ Modular structure (the "standard" — adding an effect is one function + one
 - **IMU tilt (next):** onboard QMI8658 on I2C (pins ~IO43/IO44 — confirm SDA/SCL order
   + addr 0x6A/0x6B from schematic; use `Wire.begin(43,44)`, lib `SensorLib 0.4.1`).
   Feed gravity into `Inputs.ax/ay` (already plumbed) so tilt pours the sand.
+- **Video mode (✅ CONFIRMED PLAYING on hardware 2026-06-02):** plays MJPEG/AVI clips off
+  the microSD card. Verified end-to-end with multiple clips cycling as scenes, correct
+  colors, no crashes. **Raw decode (SD read + JPEG) measured ~22–26 ms/frame** → max
+  sustainable ~38 fps (decode-bound; the 13.5 ms DMA push overlaps on the other core).
+  So **24–30 fps clips hold steady**; higher `-q:v` quality → bigger frames → slower
+  decode → lower ceiling. Set the rate via the AVI's encoded fps (vidprep/ffmpeg `fps=`);
+  the player reads `avih` and paces to it. No HW
+  video decoder on the S3 → clips must be **Motion-JPEG in an AVI**, pre-cropped to exactly
+  172×320 (no on-device scale/crop). Lib: **JPEGDEC 1.8.4** (also pulled in bb_spi_lcd as
+  a dep). SD on **SDMMC 4-bit** (pins in board.h, 1-bit fallback). Realistic ~15–25 fps.
+  - ⚠️ **Video mode requires PSRAM ON.** Build it with `PSRAM=opi` (the N16R8 has octal
+    PSRAM), NOT the effects-only `PSRAM=disabled` FQBN. The framebuffers + JPEG buffer
+    live in PSRAM in this build (see Memory below). The committed effects-only build still
+    uses `PSRAM=disabled` and keeps framebuffers in fast SRAM at 91 fps.
+  - `video.h`/`video.cpp`: mounts SD, scans `/` for `*.avi`, demuxes the AVI `movi`
+    list, decodes each `00dc` JPEG with JPEGDEC straight into the framebuffer (pixel
+    type **RGB565_BIG_ENDIAN** = the sprite's byte-swapped layout). Paced to the clip's
+    `avih` fps so producing one frame per call == playback at that rate.
+  - **Scene model (genart.ino):** a scene is an effect (0..NUM_EFFECTS-1) OR a clip
+    (NUM_EFFECTS..). BOOT cycles the unified counter, so it steps through effects *and*
+    clips. Video scenes light the RGB LED cyan. Render-task stack bumped to 16 KB (SD +
+    decode run there, on core 0).
+  - ⚠️ **SD clip discovery on large (≥64 GB SDXC) cards:** the card mounts and reports
+    correct total/used bytes, but `SD_MMC.open("/").openNextFile()` returns **nothing** —
+    ESP-IDF FATFS won't enumerate the root on big FAT32 volumes. Reading a file **by path**
+    works fine, though. So `videoInit()` does: (1) try `openNextFile()` enumeration (works
+    on ≤32 GB cards), then (2) if that finds 0 clips, read a **`/clips.txt` manifest** —
+    one clip filename/path per line (`#` comments, blank lines, optional leading `/`) — and
+    open each listed clip **directly by path**. ✅ Confirmed working with a 64 GB SDXC card
+    + 2-line manifest. A ≤32 GB FAT32 card enumerates normally and needs no manifest.
+  - ⚠️ The device's FATFS is **FAT32 only — NOT exFAT** (exFAT is disabled in the Arduino
+    esp32 core). 64 GB cards default to exFAT and won't mount; reformat FAT32 (use Rufus/
+    guiformat for >32 GB, big cluster = faster PC mount), or just use a ≤32 GB card.
+  - ⚠️ **Memory — RESOLVED 2026-06-02, the hard part of this feature.** Internal SRAM
+    (512 KB, ~320–380 KB usable as heap) cannot hold **two 110 KB framebuffers + the
+    16 KB render-task stack + the video libs' buffers** (SD_MMC/FS/JPEGDEC add ~20 KB
+    static vs the effects-only build). Symptoms we hit, in order:
+    - `freeHeap` looked OK (~30 KB) but the **largest contiguous block was only ~7.6 KB**
+      → `xTaskCreatePinnedToCore` for the 16 KB render stack failed (`rc=-1`), the
+      producer never ran, `loop()` blocked forever on `readyQ` → **black screen, no fps
+      lines**. (Lesson: it's *contiguity/fragmentation*, not total free heap. Print
+      `ESP.getMaxAllocHeap()`, and **check the task-create return code** — the old code
+      ignored it.)
+    - Allocating the task first fixed that, but then the **2nd framebuffer** had no room
+      → `createSprite` returned NULL → render task wrote through NULL → `StoreProhibited`
+      panic (`EXCVADDR 0x0`), reboot loop.
+    - **Fix:** put both framebuffers in PSRAM (`sprite.setPsram(true)` before
+      `createSprite`) and the 48 KB JPEG buffer in PSRAM (`ps_malloc`, falls back to
+      `malloc`). Frees ~263 KB of internal SRAM. Sand then runs **~75 fps** (vs 91 with
+      SRAM framebuffers): per-pixel render rose only ~2.4→3.4 ms (sand grid stays in
+      SRAM; only the block-fill writes hit PSRAM), and the DMA push rose 11→13.5 ms — the
+      push is the bottleneck, so the hit is small. The committed effects-only build keeps
+      framebuffers in SRAM for the full 91 fps.
+    - JPEG-buffer ceiling is `MAX_JPEG` (48 KB) — clips whose frames exceed it skip.
+  - Clips are prepped on a computer. `tools/vidprep/` is a single-file static web app
+    (open `index.html`, no server) to visually crop (locked 172:320), trim, and preview
+    with a **nearest-neighbour** blow-up; it emits the exact `ffmpeg` command to render
+    the AVI (pipeline: rotate → crop → scale 172×320 → fps; `-an`, MJPEG via `-q:v`).
 - More sims (water/walls, Game of Life), optional PWM brightness via core-3.x
   `ledcAttach`, microSD presets.
 

@@ -4,9 +4,11 @@
 // then append one row to the EFFECTS[] table (name, fn, palette id, LED color).
 // Nothing else in the project needs to change.
 //
-// Effects write an 8-bit PALETTE INDEX (0..255) per pixel into `buf` (row-major,
-// stride == w). The palette maps index->RGB565 at push time, so the same effect
-// recolors for free by pointing at a different palette.
+// Effects compute a 0..255 value per pixel and write `pal[value]` — a ready-made
+// RGB565 color — straight into `buf` (row-major, stride == w). Writing RGB565
+// directly (rather than an 8-bit index converted at push time) makes the DMA push
+// a pure blit, which is the 55->91 fps win. Effects stay palette-agnostic and
+// recolor for free by being handed a different `pal`.
 #pragma once
 #include <stdint.h>
 

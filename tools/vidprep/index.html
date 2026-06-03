@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>vidprep — ESP32 172×320 clip prepper</title>
+<style>
+  :root {
+    --bg:#0e1014; --panel:#171a21; --line:#262b36; --txt:#dfe3ea; --dim:#8b94a3;
+    --acc:#5ad1c4; --acc2:#ffb347; --warn:#ff6b6b;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--txt);
+    font:14px/1.45 ui-sans-serif,system-ui,Segoe UI,Roboto,sans-serif;
+  }
+  header { padding:14px 18px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:12px; }
+  header h1 { font-size:16px; margin:0; letter-spacing:.3px; }
+  header .sub { color:var(--dim); font-size:12px; }
+  .wrap { display:grid; grid-template-columns: 1fr 360px; gap:16px; padding:16px; align-items:start; }
+  @media (max-width:980px){ .wrap{ grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.8px; color:var(--dim); margin:0 0 10px; }
+  .drop {
+    border:1.5px dashed var(--line); border-radius:10px; padding:26px; text-align:center; color:var(--dim);
+    cursor:pointer; transition:.15s;
+  }
+  .drop.drag { border-color:var(--acc); color:var(--acc); background:#11161a; }
+  .stagewrap { display:flex; gap:18px; flex-wrap:wrap; align-items:flex-start; }
+  .col { display:flex; flex-direction:column; gap:6px; }
+  .col .lbl { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.6px; }
+  #stage { background:#000; border:1px solid var(--line); border-radius:6px; touch-action:none; cursor:move; display:block; }
+  #preview { image-rendering:pixelated; image-rendering:crisp-edges; background:#000; border:1px solid var(--line); border-radius:6px; display:block; }
+  .timeline { margin-top:14px; }
+  .bar { position:relative; height:34px; background:#0a0c10; border:1px solid var(--line); border-radius:6px; cursor:pointer; user-select:none; }
+  .sel { position:absolute; top:0; bottom:0; background:rgba(90,209,196,.16); border-left:2px solid var(--acc); border-right:2px solid var(--acc); }
+  .handle { position:absolute; top:-3px; width:12px; height:40px; margin-left:-6px; background:var(--acc); border-radius:3px; cursor:ew-resize; }
+  .handle.out { background:var(--acc2); }
+  .play { position:absolute; top:0; bottom:0; width:2px; background:#fff; pointer-events:none; }
+  .tlrow { display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap; color:var(--dim); font-size:12px; }
+  button { background:#222835; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:6px 11px; cursor:pointer; font-size:13px; }
+  button:hover { border-color:var(--acc); }
+  button.primary { background:var(--acc); color:#06201d; border-color:var(--acc); font-weight:600; }
+  .ctl { display:flex; justify-content:space-between; align-items:center; gap:10px; margin:9px 0; }
+  .ctl label { color:var(--dim); }
+  select, input[type=number], input[type=text] {
+    background:#0a0c10; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:5px 8px; font-size:13px;
+  }
+  input[type=range]{ accent-color:var(--acc); }
+  input[type=number]{ width:74px; } input[type=text]{ width:170px; }
+  .cmd { width:100%; min-height:120px; background:#0a0c10; color:#cfe9e4; border:1px solid var(--line); border-radius:8px;
+         padding:11px; font:12px/1.5 ui-monospace,Consolas,monospace; resize:vertical; white-space:pre-wrap; word-break:break-all; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .muted { color:var(--dim); font-size:12px; }
+  .pill { font:11px ui-monospace,monospace; color:var(--acc); }
+  .warn { color:var(--warn); }
+  details { margin-top:10px; } summary { cursor:pointer; color:var(--dim); }
+  details p, details li { color:var(--dim); font-size:12.5px; }
+  code { background:#0a0c10; padding:1px 5px; border-radius:4px; color:var(--acc2); }
+</style>
+</head>
+<body>
+<header>
+  <h1>vidprep</h1>
+  <span class="sub">crop &amp; trim any video → exact ffmpeg command for a 172×320 MJPEG clip · nearest-neighbour preview</span>
+</header>
+
+<div class="wrap">
+  <!-- LEFT: video + preview + timeline -->
+  <div class="panel">
+    <div id="drop" class="drop">Drop a video here, or click to choose a file<br>
+      <span class="muted">stays on your machine — nothing is uploaded</span></div>
+
+    <div id="work" style="display:none">
+      <div class="stagewrap">
+        <div class="col">
+          <span class="lbl">Source — drag to move crop, drag corner to resize</span>
+          <canvas id="stage"></canvas>
+        </div>
+        <div class="col">
+          <span class="lbl">Device preview (172×320, nearest-neighbour ×<span id="zlbl">2</span>)</span>
+          <canvas id="preview"></canvas>
+        </div>
+      </div>
+
+      <div class="timeline">
+        <div id="bar" class="bar">
+          <div id="sel" class="sel"></div>
+          <div id="hIn" class="handle in"></div>
+          <div id="hOut" class="handle out"></div>
+          <div id="play" class="play"></div>
+        </div>
+        <div class="tlrow">
+          <button id="pp">▶ Play</button>
+          <button id="setIn">⟦ Set In</button>
+          <button id="setOut">Set Out ⟧</button>
+          <span>in <b id="tIn" class="pill">0.000</b>s</span>
+          <span>out <b id="tOut" class="pill">0.000</b>s</span>
+          <span>dur <b id="tDur" class="pill">0.000</b>s</span>
+          <span>· <span id="tNow" class="pill">0.000</span>s</span>
+          <label class="row" style="margin-left:auto">loop <input type="checkbox" id="loop" checked></label>
+        </div>
+      </div>
+    </div>
+    <video id="vid" style="display:none" playsinline></video>
+  </div>
+
+  <!-- RIGHT: controls + command -->
+  <div class="panel">
+    <h2>Output settings</h2>
+    <div class="ctl"><label>Rotate source</label>
+      <select id="rot">
+        <option value="0">None</option>
+        <option value="90cw">90° CW</option>
+        <option value="90ccw">90° CCW</option>
+        <option value="180">180°</option>
+      </select>
+    </div>
+    <div class="ctl"><label>Crop size</label>
+      <input type="range" id="csize" min="10" max="100" value="100" style="flex:1">
+    </div>
+    <div class="ctl"><label>Frame rate (fps)</label>
+      <input type="number" id="fps" value="20" min="1" max="40" step="1"></div>
+    <div class="ctl"><label>JPEG quality <span class="muted">(2 best · 31 worst)</span></label>
+      <input type="number" id="q" value="7" min="2" max="31" step="1"></div>
+    <div class="ctl"><label>Downscale filter</label>
+      <select id="filter">
+        <option value="lanczos">Lanczos (sharp)</option>
+        <option value="bilinear">Bilinear (soft)</option>
+        <option value="neighbor">Nearest (blocky)</option>
+      </select>
+    </div>
+    <div class="ctl"><label>Preview zoom</label>
+      <select id="zoom"><option value="1">×1</option><option value="2" selected>×2</option><option value="3">×3</option></select>
+    </div>
+    <div class="ctl"><label>Input filename</label><input type="text" id="inName" value="input.mp4"></div>
+    <div class="ctl"><label>Output filename</label><input type="text" id="outName" value="clip_172x320.avi"></div>
+
+    <h2 style="margin-top:18px">ffmpeg command</h2>
+    <textarea id="cmd" class="cmd" readonly spellcheck="false"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button id="copy" class="primary">Copy command</button>
+      <span id="copied" class="muted"></span>
+    </div>
+    <p class="muted" style="margin-top:8px">Run it in the folder containing your video (or fix the input path).
+      Works in PowerShell, CMD &amp; bash. Needs <code>ffmpeg</code> on PATH.</p>
+
+    <details>
+      <summary>How the preview maps to the device</summary>
+      <p>The big preview is exactly 172×320 pixels scaled up with <b>nearest-neighbour</b> (no smoothing),
+      so you see the true pixels the panel will show — not interpolated soup. The <b>downscale filter</b>
+      picks how the crop is squeezed down to 172×320, and it's matched into the ffmpeg <code>scale</code> flags.
+      Pipeline order (preview &amp; ffmpeg both): <code>rotate → crop → scale 172×320 → fps</code>.</p>
+      <ul>
+        <li>The crop box is locked to the panel's 172:320 (tall) aspect. For a landscape video, rotate 90° so it fills the screen instead of becoming a thin centre strip.</li>
+        <li>Audio is dropped (<code>-an</code>) — no speaker on the board.</li>
+        <li>Trim uses <code>-ss</code> + <code>-t</code> (start + duration) for unambiguous cuts.</li>
+      </ul>
+    </details>
+  </div>
+</div>
+
+<script>
+const AR = 172/320;            // target panel aspect (portrait)
+const TW = 172, TH = 320;
+const vid = document.getElementById('vid');
+const stage = document.getElementById('stage'), sctx = stage.getContext('2d');
+const preview = document.getElementById('preview'), pctx = preview.getContext('2d');
+const work = document.createElement('canvas'), wctx = work.getContext('2d');  // full-res rotated frame
+const small = document.createElement('canvas'), smctx = small.getContext('2d'); // 172x320 device frame
+small.width = TW; small.height = TH;
+
+const S = { rot:'0', fw:0, fh:0, crop:{x:0,y:0,w:0,h:0}, fitScale:1, zoom:2,
+            inT:0, outT:0, dur:0, loaded:false };
+
+/* ---------- file loading ---------- */
+const drop = document.getElementById('drop');
+drop.onclick = () => { const i=document.createElement('input'); i.type='file'; i.accept='video/*';
+  i.onchange=e=>load(e.target.files[0]); i.click(); };
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('drag'); };
+drop.ondragleave = () => drop.classList.remove('drag');
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove('drag'); if(e.dataTransfer.files[0]) load(e.dataTransfer.files[0]); };
+
+function load(file){
+  if(!file) return;
+  document.getElementById('inName').value = file.name;
+  const base = file.name.replace(/\.[^.]+$/,'');
+  document.getElementById('outName').value = base + '_172x320.avi';
+  vid.src = URL.createObjectURL(file);
+  vid.onloadedmetadata = () => {
+    S.dur = vid.duration; S.inT = 0; S.outT = vid.duration; S.loaded = true;
+    document.getElementById('drop').style.display='none';
+    document.getElementById('work').style.display='block';
+    applyRotation(); initCrop(); buildCmd(); layoutTimeline();
+    vid.currentTime = 0;
+  };
+}
+
+/* ---------- rotation / working frame ---------- */
+function applyRotation(){
+  const vw = vid.videoWidth, vh = vid.videoHeight;
+  if(S.rot==='90cw' || S.rot==='90ccw'){ S.fw = vh; S.fh = vw; } else { S.fw = vw; S.fh = vh; }
+  work.width = S.fw; work.height = S.fh;
+  // stage fit (cap display size)
+  const maxW = 460, maxH = 430;
+  S.fitScale = Math.min(maxW/S.fw, maxH/S.fh, 1.2);
+  stage.width = Math.round(S.fw*S.fitScale); stage.height = Math.round(S.fh*S.fitScale);
+}
+function drawWork(){
+  wctx.save(); wctx.clearRect(0,0,S.fw,S.fh);
+  const vw = vid.videoWidth, vh = vid.videoHeight;
+  if(S.rot==='90cw'){ wctx.translate(S.fw,0); wctx.rotate(Math.PI/2); }
+  else if(S.rot==='90ccw'){ wctx.translate(0,S.fh); wctx.rotate(-Math.PI/2); }
+  else if(S.rot==='180'){ wctx.translate(S.fw,S.fh); wctx.rotate(Math.PI); }
+  wctx.drawImage(vid, 0, 0, vw, vh);
+  wctx.restore();
+}
+
+/* ---------- crop ---------- */
+function initCrop(){ // largest box at target aspect, centred, scaled by csize slider
+  const pct = +document.getElementById('csize').value/100;
+  let w, h;
+  if(S.fw/S.fh > AR){ h = S.fh*pct; w = h*AR; } else { w = S.fw*pct; h = w/AR; }
+  S.crop.w = w; S.crop.h = h;
+  S.crop.x = (S.fw - w)/2; S.crop.y = (S.fh - h)/2;
+  clampCrop();
+}
+function clampCrop(){
+  const c = S.crop;
+  c.w = Math.min(c.w, S.fw); c.h = c.w/AR;
+  if(c.h > S.fh){ c.h = S.fh; c.w = c.h*AR; }
+  c.x = Math.max(0, Math.min(c.x, S.fw - c.w));
+  c.y = Math.max(0, Math.min(c.y, S.fh - c.h));
+}
+document.getElementById('csize').oninput = () => { if(S.loaded){ initCrop(); buildCmd(); } };
+
+/* ---------- pointer drag on stage ---------- */
+let drag = null;
+stage.addEventListener('pointerdown', e=>{
+  if(!S.loaded) return;
+  const r = stage.getBoundingClientRect();
+  const x = (e.clientX-r.left)/S.fitScale, y = (e.clientY-r.top)/S.fitScale;
+  const c = S.crop, hx = c.x+c.w, hy = c.y+c.h, hh = 16/S.fitScale;
+  if(Math.abs(x-hx)<hh && Math.abs(y-hy)<hh){ drag={mode:'resize'}; }
+  else if(x>=c.x && x<=hx && y>=c.y && y<=hy){ drag={mode:'move', dx:x-c.x, dy:y-c.y}; }
+  stage.setPointerCapture(e.pointerId);
+});
+stage.addEventListener('pointermove', e=>{
+  if(!drag) return;
+  const r = stage.getBoundingClientRect();
+  const x = (e.clientX-r.left)/S.fitScale, y = (e.clientY-r.top)/S.fitScale;
+  if(drag.mode==='move'){ S.crop.x = x-drag.dx; S.crop.y = y-drag.dy; }
+  else { S.crop.w = Math.max(20, x-S.crop.x); S.crop.h = S.crop.w/AR; }
+  clampCrop(); buildCmd();
+});
+stage.addEventListener('pointerup', ()=> drag=null);
+
+/* ---------- controls ---------- */
+document.getElementById('rot').onchange = e=>{ S.rot=e.target.value; if(S.loaded){ applyRotation(); initCrop(); buildCmd(); } };
+document.getElementById('zoom').onchange = e=>{ S.zoom=+e.target.value; document.getElementById('zlbl').textContent=S.zoom;
+  preview.width=TW*S.zoom; preview.height=TH*S.zoom; };
+['fps','q','filter','inName','outName'].forEach(id=> document.getElementById(id).oninput = buildCmd);
+preview.width=TW*S.zoom; preview.height=TH*S.zoom;
+
+/* ---------- timeline ---------- */
+const bar=document.getElementById('bar'), sel=document.getElementById('sel'),
+      hIn=document.getElementById('hIn'), hOut=document.getElementById('hOut'), playhead=document.getElementById('play');
+function layoutTimeline(){
+  const W = bar.clientWidth;
+  const xi = S.inT/S.dur*W, xo = S.outT/S.dur*W;
+  sel.style.left=xi+'px'; sel.style.width=(xo-xi)+'px';
+  hIn.style.left=xi+'px'; hOut.style.left=xo+'px';
+  document.getElementById('tIn').textContent=S.inT.toFixed(3);
+  document.getElementById('tOut').textContent=S.outT.toFixed(3);
+  document.getElementById('tDur').textContent=Math.max(0,S.outT-S.inT).toFixed(3);
+}
+let tdrag=null;
+function barT(e){ const r=bar.getBoundingClientRect(); return Math.max(0,Math.min(1,(e.clientX-r.left)/r.width))*S.dur; }
+hIn.addEventListener('pointerdown',e=>{tdrag='in';hIn.setPointerCapture(e.pointerId);e.stopPropagation();});
+hOut.addEventListener('pointerdown',e=>{tdrag='out';hOut.setPointerCapture(e.pointerId);e.stopPropagation();});
+bar.addEventListener('pointerdown',e=>{ if(tdrag)return; vid.currentTime=barT(e); });
+window.addEventListener('pointermove',e=>{
+  if(!tdrag||!S.loaded) return;
+  const t=barT(e);
+  if(tdrag==='in') S.inT=Math.min(t,S.outT-0.05);
+  else S.outT=Math.max(t,S.inT+0.05);
+  layoutTimeline(); buildCmd();
+});
+window.addEventListener('pointerup',()=>tdrag=null);
+document.getElementById('setIn').onclick=()=>{S.inT=Math.min(vid.currentTime,S.outT-0.05);layoutTimeline();buildCmd();};
+document.getElementById('setOut').onclick=()=>{S.outT=Math.max(vid.currentTime,S.inT+0.05);layoutTimeline();buildCmd();};
+const pp=document.getElementById('pp');
+pp.onclick=()=>{ if(vid.paused){ if(vid.currentTime<S.inT||vid.currentTime>=S.outT) vid.currentTime=S.inT; vid.play(); pp.textContent='⏸ Pause'; }
+                 else { vid.pause(); pp.textContent='▶ Play'; } };
+window.addEventListener('resize',()=>{ if(S.loaded) layoutTimeline(); });
+
+/* ---------- render loop ---------- */
+function tick(){
+  if(S.loaded && vid.readyState>=2){
+    // loop within trim
+    if(!vid.paused && document.getElementById('loop').checked && vid.currentTime>=S.outT){ vid.currentTime=S.inT; }
+    drawWork();
+    // stage
+    sctx.clearRect(0,0,stage.width,stage.height);
+    sctx.drawImage(work,0,0,stage.width,stage.height);
+    const c=S.crop, f=S.fitScale;
+    sctx.strokeStyle='#5ad1c4'; sctx.lineWidth=2;
+    sctx.strokeRect(c.x*f,c.y*f,c.w*f,c.h*f);
+    sctx.fillStyle='#5ad1c4'; sctx.fillRect((c.x+c.w)*f-6,(c.y+c.h)*f-6,12,12); // resize handle
+    sctx.fillStyle='rgba(0,0,0,.45)';                                            // dim outside
+    sctx.fillRect(0,0,stage.width,c.y*f);
+    sctx.fillRect(0,(c.y+c.h)*f,stage.width,stage.height-(c.y+c.h)*f);
+    sctx.fillRect(0,c.y*f,c.x*f,c.h*f);
+    sctx.fillRect((c.x+c.w)*f,c.y*f,stage.width-(c.x+c.w)*f,c.h*f);
+    // device frame: crop -> 172x320 (smoothing per filter) -> nearest upscale
+    const blocky = document.getElementById('filter').value==='neighbor';
+    smctx.imageSmoothingEnabled = !blocky;
+    smctx.clearRect(0,0,TW,TH);
+    smctx.drawImage(work, c.x,c.y,c.w,c.h, 0,0,TW,TH);
+    pctx.imageSmoothingEnabled=false;
+    pctx.drawImage(small,0,0,preview.width,preview.height);
+    // readouts
+    document.getElementById('tNow').textContent=vid.currentTime.toFixed(3);
+    if(playhead) playhead.style.left=(vid.currentTime/S.dur*bar.clientWidth)+'px';
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+/* ---------- command builder ---------- */
+function buildCmd(){
+  if(!S.loaded){ return; }
+  layoutTimeline();
+  const c=S.crop;
+  const cx=Math.round(c.x), cy=Math.round(c.y), cw=Math.round(c.w), ch=Math.round(c.h);
+  const fps=+document.getElementById('fps').value||20;
+  const q=+document.getElementById('q').value||7;
+  const filt=document.getElementById('filter').value;
+  const flags = filt==='neighbor'?'neighbor':filt;        // lanczos|bilinear|neighbor
+  let rot='';
+  if(S.rot==='90cw') rot='transpose=1,';
+  else if(S.rot==='90ccw') rot='transpose=2,';
+  else if(S.rot==='180') rot='transpose=1,transpose=1,';
+  const inN=document.getElementById('inName').value||'input.mp4';
+  const outN=document.getElementById('outName').value||'clip_172x320.avi';
+  const ss=S.inT.toFixed(3), dur=Math.max(0.05,S.outT-S.inT).toFixed(3);
+  const vf=`${rot}crop=${cw}:${ch}:${cx}:${cy},scale=${TW}:${TH}:flags=${flags},fps=${fps}`;
+  const cmd=`ffmpeg -ss ${ss} -t ${dur} -i "${inN}" -vf "${vf}" -c:v mjpeg -q:v ${q} -an "${outN}"`;
+  document.getElementById('cmd').value=cmd;
+}
+document.getElementById('copy').onclick=()=>{
+  navigator.clipboard.writeText(document.getElementById('cmd').value).then(()=>{
+    const c=document.getElementById('copied'); c.textContent='copied ✓'; setTimeout(()=>c.textContent='',1500);
+  });
+};
+</script>
+</body>
+</html>
