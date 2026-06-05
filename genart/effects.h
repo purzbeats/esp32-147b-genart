@@ -43,8 +43,9 @@ extern const int    NUM_EFFECTS;
 // colors pre-converted to the panel's RGB565 (filled in setup() via lcd.color565
 // so the byte order is guaranteed correct). Effects index PAL565.
 // 0..2: cosine gradients used by the shaders. 3..10: curated 2-color gradients
-// used by the sand (one picked per run). See effects.cpp.
-static const int NUM_PALETTES = 11;
+// used by the sand + the CA sims (one picked per run). 11: bespoke forest-fire
+// heat ramp (empty/tree/burning). See effects.cpp.
+static const int NUM_PALETTES = 12;
 extern uint8_t  PALETTES[NUM_PALETTES][256][3];
 extern uint16_t PAL565[NUM_PALETTES][256];
 

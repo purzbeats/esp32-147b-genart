@@ -15,6 +15,19 @@ uint16_t PAL565[NUM_PALETTES][256];        // RGB565, filled in setup() (see gen
 
 static inline uint8_t clamp8(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
 
+// Fill one CELLxCELL block of the framebuffer with a solid color. Shared by every
+// grid-based simulation (sand + the CA sims) so the index->pixel blit lives in one
+// place. (gx,gy) is the grid cell; cell is its pixel size.
+static inline void cellBlock(uint16_t* buf, int w, int gx, int gy, int cell, uint16_t c) {
+  int px = gx * cell, py = gy * cell;
+  for (int by = 0; by < cell; by++) {
+    uint16_t* row = &buf[(py + by) * w + px];
+    for (int bx = 0; bx < cell; bx++) row[bx] = c;
+  }
+}
+
+#define PAL_FIRE 11   // index of the bespoke forest-fire heat palette (built below)
+
 // Inigo-Quilez cosine gradient: color(t) = a + b*cos(2pi*(c*t + d)), per channel.
 // These produce smooth, harmonious, band-free gradients — the look behind most
 // good procedural color. https://iquilezles.org/articles/palettes/
@@ -67,6 +80,27 @@ void buildTables() {
         PALETTES[SAND_PAL_FIRST + p][i][k] = (uint8_t)(lo + (hi - lo) * tri / 255);
       }
     }
+
+  // 11 — forest-fire heat ramp (NOT cyclic). Three zones the fire sim indexes by
+  // cell state: 0 = empty (black); 1..127 = living tree (dark->mid green); 128..255
+  // = burning ember cooling through dark-red -> orange -> yellow -> white-hot.
+  auto lerp = [](int a, int b, int t, int span) { return a + (b - a) * t / span; };
+  for (int i = 0; i < 256; i++) {
+    int r, g, b;
+    if (i == 0) { r = g = b = 0; }                                   // empty
+    else if (i < 128) {                                              // tree (green)
+      r = lerp(8, 70, i - 1, 126); g = lerp(24, 150, i - 1, 126); b = lerp(6, 40, i - 1, 126);
+    } else if (i < 180) {                                            // dark red -> orange
+      r = lerp(60, 220, i - 128, 52); g = lerp(6, 80, i - 128, 52);  b = 0;
+    } else if (i < 220) {                                            // orange -> yellow
+      r = lerp(220, 255, i - 180, 40); g = lerp(80, 190, i - 180, 40); b = lerp(0, 40, i - 180, 40);
+    } else {                                                         // yellow -> white-hot
+      r = 255; g = lerp(190, 250, i - 220, 35); b = lerp(40, 210, i - 220, 35);
+    }
+    PALETTES[PAL_FIRE][i][0] = clamp8(r);
+    PALETTES[PAL_FIRE][i][1] = clamp8(g);
+    PALETTES[PAL_FIRE][i][2] = clamp8(b);
+  }
 }
 
 // --- Effects --------------------------------------------------------------------
@@ -240,24 +274,262 @@ static void fxSand(uint16_t* buf, int w, int h, const Inputs& in, const uint16_t
   }
 
   // Render grid -> framebuffer as solid CELL x CELL blocks (empty = black).
-  for (int y = 0; y < SAND_GH; y++) {
+  for (int y = 0; y < SAND_GH; y++)
     for (int x = 0; x < SAND_GW; x++) {
       uint8_t v = sgrid[y * SAND_GW + x];
-      uint16_t c = v ? spal[v] : 0x0000;
-      int px = x * SAND_CELL, py = y * SAND_CELL;
-      for (int by = 0; by < SAND_CELL; by++) {
-        uint16_t* row = &buf[(py + by) * w + px];
-        for (int bx = 0; bx < SAND_CELL; bx++) row[bx] = c;
+      cellBlock(buf, w, x, y, SAND_CELL, v ? spal[v] : 0x0000);
+    }
+}
+
+// --- Shared CA scratch ----------------------------------------------------------
+// Single next-generation buffer reused by every double-buffered CA below (Life,
+// CCA, fire). Safe to share: exactly one effect renders at a time (the render task
+// on core 0), and each step fully overwrites the prefix it uses before copying back.
+// Sized to the largest CA grid (the 86x160 2px grids); Life uses only the prefix.
+static uint8_t s_scratch[SAND_GW * SAND_GH];
+
+// --- Conway's Game of Life (age-colored) ----------------------------------------
+// Toroidal CA on a 43x80 grid (4px cells -> bold, readable patterns). Cells carry
+// an *age* (frames survived, saturating at 255) which indexes the run's cyclic
+// palette: newborns sit at the lo color, mature cells bloom to the hi color, then
+// elders cycle back — so gliders and oscillators leave shimmering trails. Reseeds a
+// fresh random soup (new palette + density) on extinction, stasis, or a max age.
+#define LF_CELL 4
+#define LF_GW   43            // SCREEN_W / LF_CELL (172/4)
+#define LF_GH   80            // SCREEN_H / LF_CELL (320/4)
+static uint8_t  lgrid[LF_GW * LF_GH];
+static bool     lifeInit = false;
+static int      lifePal  = SAND_PAL_FIRST;
+static uint32_t lifePrevPop = 0, lifeStable = 0, lifeGen = 0;
+
+static void lifeSeed() {
+  lifePal = SAND_PAL_FIRST + (int)(xr() % SAND_PAL_COUNT);
+  int dens = 25 + (int)(xr() % 25);                    // 25..49% live
+  for (int i = 0; i < LF_GW * LF_GH; i++)
+    lgrid[i] = ((int)(xr() % 100) < dens) ? 1 : 0;
+  lifePrevPop = 0; lifeStable = 0; lifeGen = 0;
+}
+
+static void fxLife(uint16_t* buf, int w, int h, const Inputs& in, const uint16_t* pal) {
+  if (!lifeInit) { lifeSeed(); lifeInit = true; }
+  const uint16_t* lpal = PAL565[lifePal];
+
+  if (in.frame % 5 == 0) {                              // step generation ~18 Hz
+    uint32_t pop = 0;
+    for (int y = 0; y < LF_GH; y++) {
+      int ym = ((y - 1 + LF_GH) % LF_GH) * LF_GW, yc = y * LF_GW, yp = ((y + 1) % LF_GH) * LF_GW;
+      for (int x = 0; x < LF_GW; x++) {
+        int xm = (x - 1 + LF_GW) % LF_GW, xp = (x + 1) % LF_GW;
+        int n = (lgrid[ym + xm] > 0) + (lgrid[ym + x] > 0) + (lgrid[ym + xp] > 0)
+              + (lgrid[yc + xm] > 0)                       + (lgrid[yc + xp] > 0)
+              + (lgrid[yp + xm] > 0) + (lgrid[yp + x] > 0) + (lgrid[yp + xp] > 0);
+        uint8_t v = lgrid[yc + x], nv;
+        if (v) nv = (n == 2 || n == 3) ? (v < 255 ? v + 1 : 255) : 0;   // survive (age++)
+        else   nv = (n == 3) ? 1 : 0;                                   // birth
+        s_scratch[yc + x] = nv;
+        if (nv) pop++;
       }
     }
+    memcpy(lgrid, s_scratch, LF_GW * LF_GH);
+    lifeStable = (pop == lifePrevPop) ? lifeStable + 1 : 0;   // count stalled generations
+    lifePrevPop = pop;
+    if (pop == 0 || lifeStable > 24 || ++lifeGen > 360) lifeSeed();
   }
+
+  for (int y = 0; y < LF_GH; y++)
+    for (int x = 0; x < LF_GW; x++) {
+      uint8_t v = lgrid[y * LF_GW + x];
+      cellBlock(buf, w, x, y, LF_CELL, v ? lpal[v] : 0x0000);
+    }
+}
+
+// --- Cyclic cellular automaton (spiral waves) -----------------------------------
+// Griffeath cyclic CA on the 86x160 grid: each cell has a phase 0..N-1 and advances
+// to (phase+1) mod N when >= threshold von-Neumann neighbors already hold that next
+// phase. From random noise this self-organizes into rotating spiral waves (a
+// Belousov-Zhabotinsky look). Phase maps straight onto a cyclic palette, so the
+// spirals read as rotating color bands. New N / threshold / palette each run.
+#define CC_CELL 2
+#define CC_GW   SAND_GW       // 86
+#define CC_GH   SAND_GH       // 160
+static uint8_t  ccgrid[CC_GW * CC_GH];
+static bool     ccInit = false;
+static int      ccPal = SAND_PAL_FIRST, ccN = 12, ccThresh = 1;
+static uint32_t ccAge = 0;
+
+static void ccaSeed() {
+  ccPal    = SAND_PAL_FIRST + (int)(xr() % SAND_PAL_COUNT);
+  ccN      = 6 + (int)(xr() % 11);                     // 6..16 phases
+  ccThresh = 1 + (int)(xr() % 2);                      // 1 or 2 (2 = chunkier waves)
+  for (int i = 0; i < CC_GW * CC_GH; i++) ccgrid[i] = (uint8_t)(xr() % ccN);
+  ccAge = 0;
+}
+
+static void fxCCA(uint16_t* buf, int w, int h, const Inputs& in, const uint16_t* pal) {
+  if (!ccInit) { ccaSeed(); ccInit = true; }
+  const uint16_t* cpal = PAL565[ccPal];
+
+  if (in.frame % 2 == 0) {                              // step ~45 Hz
+    for (int y = 0; y < CC_GH; y++) {
+      int ym = ((y - 1 + CC_GH) % CC_GH) * CC_GW, yc = y * CC_GW, yp = ((y + 1) % CC_GH) * CC_GW;
+      for (int x = 0; x < CC_GW; x++) {
+        int xm = (x - 1 + CC_GW) % CC_GW, xp = (x + 1) % CC_GW;
+        uint8_t p = ccgrid[yc + x], nextp = (p + 1) % ccN;
+        int cnt = (ccgrid[ym + x] == nextp) + (ccgrid[yp + x] == nextp)
+                + (ccgrid[yc + xm] == nextp) + (ccgrid[yc + xp] == nextp);
+        s_scratch[yc + x] = (cnt >= ccThresh) ? nextp : p;
+      }
+    }
+    memcpy(ccgrid, s_scratch, CC_GW * CC_GH);
+    if (++ccAge > 1400) ccaSeed();
+  }
+
+  for (int y = 0; y < CC_GH; y++)
+    for (int x = 0; x < CC_GW; x++) {
+      uint8_t idx = (uint8_t)(ccgrid[y * CC_GW + x] * 255 / (ccN - 1));
+      cellBlock(buf, w, x, y, CC_CELL, cpal[idx]);
+    }
+}
+
+// --- Forest fire (Drossel-Schwabl) ----------------------------------------------
+// Self-organizing 3-state CA on the 86x160 grid. Cell states packed into one byte:
+// 0 = empty, 1 = living tree, 128..255 = burning ember (the value is its heat, which
+// cools each step until it goes out). A tree ignites if a neighbor burns or rarely
+// from "lightning"; empty cells regrow trees at a small probability. Fronts of fire
+// sweep through the forest and green regrows behind — endless, no reset needed
+// (params re-roll occasionally for variety). Uses the bespoke PAL_FIRE heat ramp.
+#define FR_CELL 2
+#define FR_GW   SAND_GW       // 86
+#define FR_GH   SAND_GH       // 160
+static uint8_t  fgrid[FR_GW * FR_GH];
+static bool     fireInit = false;
+static uint32_t fireGrow = 1200, fireLight = 12, fireAge = 0;   // probabilities out of 65536
+
+static void fireSeed() {
+  fireGrow  = 600 + (xr() % 1600);                     // tree regrowth prob
+  fireLight = 3 + (xr() % 18);                         // lightning-strike prob
+  for (int i = 0; i < FR_GW * FR_GH; i++) fgrid[i] = (xr() % 100 < 40) ? 1 : 0;
+  fireAge = 0;
+}
+
+static void fxFire(uint16_t* buf, int w, int h, const Inputs& in, const uint16_t* pal) {
+  if (!fireInit) { fireSeed(); fireInit = true; }
+  const uint16_t* fpal = PAL565[PAL_FIRE];
+
+  if (in.frame % 2 == 0) {                              // step ~45 Hz
+    for (int y = 0; y < FR_GH; y++) {
+      int ym = ((y - 1 + FR_GH) % FR_GH) * FR_GW, yc = y * FR_GW, yp = ((y + 1) % FR_GH) * FR_GW;
+      for (int x = 0; x < FR_GW; x++) {
+        int xm = (x - 1 + FR_GW) % FR_GW, xp = (x + 1) % FR_GW;
+        uint8_t v = fgrid[yc + x], nv;
+        if (v >= 128) {                                // burning -> cool, then burn out
+          nv = (v >= 128 + 24) ? v - 24 : 0;
+        } else if (v == 1) {                           // tree -> maybe ignite
+          bool nb = fgrid[ym + x] >= 128 || fgrid[yp + x] >= 128 || fgrid[yc + xm] >= 128 || fgrid[yc + xp] >= 128
+                 || fgrid[ym + xm] >= 128 || fgrid[ym + xp] >= 128 || fgrid[yp + xm] >= 128 || fgrid[yp + xp] >= 128;
+          nv = (nb || (xr() & 0xFFFF) < fireLight) ? 255 : 1;
+        } else {                                       // empty -> maybe regrow
+          nv = ((xr() & 0xFFFF) < fireGrow) ? 1 : 0;
+        }
+        s_scratch[yc + x] = nv;
+      }
+    }
+    memcpy(fgrid, s_scratch, FR_GW * FR_GH);
+    if (++fireAge > 3000) fireSeed();
+  }
+
+  for (int y = 0; y < FR_GH; y++)
+    for (int x = 0; x < FR_GW; x++) {
+      uint8_t v = fgrid[y * FR_GW + x];
+      uint16_t c = (v == 0) ? fpal[0] : (v == 1) ? fpal[90] : fpal[v];  // empty/tree/ember
+      cellBlock(buf, w, x, y, FR_CELL, c);
+    }
+}
+
+// --- Reaction-diffusion (Gray-Scott) --------------------------------------------
+// The showpiece: two chemicals U and V diffuse and react, producing organic Turing
+// patterns (spots, stripes, coral, mitosis). Run in float (the S3 has an FPU) on a
+// 43x80 grid (4px cells) with several iterations per displayed frame so the pattern
+// visibly grows. The (f,k) feed/kill pair picks the morphology; a small table of
+// known-interesting pairs is rolled per run alongside a cyclic palette mapping V.
+#define RD_CELL 4
+#define RD_GW   43            // SCREEN_W / RD_CELL
+#define RD_GH   80            // SCREEN_H / RD_CELL
+static float    rU[RD_GW * RD_GH], rV[RD_GW * RD_GH], rU2[RD_GW * RD_GH], rV2[RD_GW * RD_GH];
+static bool     rdInit = false;
+static int      rdPal = SAND_PAL_FIRST;
+static float    rdF = 0.0545f, rdK = 0.062f;
+static uint32_t rdAge = 0;
+
+// Hand-picked (feed, kill) pairs, each a different pattern regime.
+static const float RD_FK[][2] = {
+  { 0.0367f, 0.0649f },   // mitosis (dividing cells)
+  { 0.0545f, 0.0620f },   // worms / spots
+  { 0.0260f, 0.0510f },   // moving waves
+  { 0.0140f, 0.0450f },   // solitons
+  { 0.0390f, 0.0580f },   // maze
+  { 0.0300f, 0.0560f },   // coral
+};
+
+static void rdSeed() {
+  rdPal = SAND_PAL_FIRST + (int)(xr() % SAND_PAL_COUNT);
+  int p = (int)(xr() % (sizeof(RD_FK) / sizeof(RD_FK[0])));
+  rdF = RD_FK[p][0]; rdK = RD_FK[p][1];
+  for (int i = 0; i < RD_GW * RD_GH; i++) { rU[i] = 1.0f; rV[i] = 0.0f; }
+  for (int s = 0; s < 25; s++) {                       // sprinkle V seed blobs
+    int cx = xr() % RD_GW, cy = xr() % RD_GH;
+    for (int dy = -2; dy <= 2; dy++)
+      for (int dx = -2; dx <= 2; dx++) {
+        int x = (cx + dx + RD_GW) % RD_GW, y = (cy + dy + RD_GH) % RD_GH;
+        rU[y * RD_GW + x] = 0.25f; rV[y * RD_GW + x] = 0.5f;
+      }
+  }
+  rdAge = 0;
+}
+
+static void fxReaction(uint16_t* buf, int w, int h, const Inputs& in, const uint16_t* pal) {
+  if (!rdInit) { rdSeed(); rdInit = true; }
+  const uint16_t* rpal = PAL565[rdPal];
+  const float Du = 0.16f, Dv = 0.08f;
+
+  for (int it = 0; it < 10; it++) {                    // many micro-steps per frame
+    for (int y = 0; y < RD_GH; y++) {
+      int ym = ((y - 1 + RD_GH) % RD_GH) * RD_GW, yc = y * RD_GW, yp = ((y + 1) % RD_GH) * RD_GW;
+      for (int x = 0; x < RD_GW; x++) {
+        int xm = (x - 1 + RD_GW) % RD_GW, xp = (x + 1) % RD_GW;
+        float u = rU[yc + x], v = rV[yc + x];
+        float lapU = (rU[yc + xm] + rU[yc + xp] + rU[ym + x] + rU[yp + x]) * 0.2f
+                   + (rU[ym + xm] + rU[ym + xp] + rU[yp + xm] + rU[yp + xp]) * 0.05f - u;
+        float lapV = (rV[yc + xm] + rV[yc + xp] + rV[ym + x] + rV[yp + x]) * 0.2f
+                   + (rV[ym + xm] + rV[ym + xp] + rV[yp + xm] + rV[yp + xp]) * 0.05f - v;
+        float uvv = u * v * v;
+        float nu = u + (Du * lapU - uvv + rdF * (1.0f - u));
+        float nv = v + (Dv * lapV + uvv - (rdF + rdK) * v);
+        rU2[yc + x] = nu < 0 ? 0 : (nu > 1 ? 1 : nu);
+        rV2[yc + x] = nv < 0 ? 0 : (nv > 1 ? 1 : nv);
+      }
+    }
+    memcpy(rU, rU2, sizeof(rU));
+    memcpy(rV, rV2, sizeof(rV));
+  }
+  if (++rdAge > 2600) rdSeed();
+
+  for (int y = 0; y < RD_GH; y++)
+    for (int x = 0; x < RD_GW; x++) {
+      int idx = (int)(rV[y * RD_GW + x] * 640.0f);
+      cellBlock(buf, w, x, y, RD_CELL, rpal[idx > 255 ? 255 : idx]);
+    }
 }
 
 // --- Registry: the one place to add an effect -----------------------------------
 const Effect EFFECTS[] = {
-  { "sand",   fxSand,   0, 28, 18,  0 },   // pixel-art falling-sand simulation
-  { "plasma", fxPlasma, 0,  0, 20, 12 },
-  { "rings",  fxRings,  1, 24,  6,  0 },
-  { "weave",  fxWeave,  2,  0,  6, 24 },
+  { "sand",     fxSand,     0, 28, 18,  0 },   // pixel-art falling-sand simulation
+  { "plasma",   fxPlasma,   0,  0, 20, 12 },
+  { "rings",    fxRings,    1, 24,  6,  0 },
+  { "weave",    fxWeave,    2,  0,  6, 24 },
+  { "life",     fxLife,     0,  4, 22,  8 },   // Conway's Life, age-colored (own palette)
+  { "cca",      fxCCA,      2, 16,  4, 22 },   // cyclic CA spiral waves (own palette)
+  { "fire",     fxFire,     0, 28,  6,  0 },   // forest-fire CA (PAL_FIRE heat ramp)
+  { "reaction", fxReaction, 1,  0, 18, 16 },   // Gray-Scott reaction-diffusion (own palette)
 };
 const int NUM_EFFECTS = sizeof(EFFECTS) / sizeof(EFFECTS[0]);

@@ -12,6 +12,11 @@ Read this first when returning.
 > ✅ **GEN-ART APP BUILT (`genart/`, ~91 fps).** Dual-core 16bpp render pipeline at the
 > SPI ceiling; effect framework + falling-sand sim with per-run variety; BOOT cycles
 > effects. See "The app" section below. **Next: wire the onboard QMI8658 IMU for tilt.**
+>
+> 🚧 **8 effects now (uncommitted in `effects.cpp/.h`).** Added a CA family —
+> `life` (age-colored Conway), `cca` (cyclic-CA spiral waves), `fire` (forest-fire
+> heat ramp), `reaction` (Gray-Scott reaction-diffusion, float/FPU). See "Effect/sim
+> learnings" for the shared grid infra they introduced.
 
 ## Commands
 
@@ -165,8 +170,8 @@ Modular structure (the "standard" — adding an effect is one function + one
 - `board.h` — pins + verified `LGFX` panel class + `SCREEN_W/H`. Single source of
   hardware truth; no globals (declare `LGFX lcd;` in the .ino).
 - `effects.h` / `effects.cpp` — `Inputs` struct (frame + `ax/ay/az` tilt) handed to
-  every effect; `EFFECTS[]` registry; sin LUT + palettes. Effects: `sand` (default),
-  `plasma`, `rings`, `weave`.
+  every effect; `EFFECTS[]` registry; sin LUT + palettes. Effects: shaders `plasma`,
+  `rings`, `weave`; grid/CA sims `sand` (default), `life`, `cca`, `fire`, `reaction`.
 - `genart.ino` — dual-core pipeline, BOOT cycling, RGB LED, fps/timing prints.
 
 **Reading order for a new instance:** `board.h` (hardware truth) → `effects.h`
@@ -206,6 +211,21 @@ Modular structure (the "standard" — adding an effect is one function + one
   - Per-run randomization (palette, spray width/count, wind strength/freqs, emitter
     motion pattern) keyed off a `sandNewRun()`; seed PRNG from `esp_random()` at boot.
   - Smooth motion = sines / low-passed noise. A raw per-frame random walk reads jagged.
+- **Grid/CA family (`life`, `cca`, `fire`, `reaction`)** shares helpers in `effects.cpp`:
+  - `cellBlock(buf,w,gx,gy,cell,color)` — fills one `cell×cell` framebuffer block; the
+    one place the grid→pixel blit lives. `sand` now uses it too.
+  - `s_scratch[SAND_GW*SAND_GH]` — a single next-generation buffer reused by every
+    double-buffered CA (each step writes scratch, then `memcpy`s back). Safe to share
+    because exactly one effect renders at a time (render task, core 0).
+  - Cell sizes/grids vary per sim: 2px `86×160` (cca, fire — alias `SAND_GW/GH`) vs 4px
+    `43×80` (life, reaction). Most CAs are toroidal (wrap-around neighbors) and **gate
+    stepping by `in.frame % N`** (Life ~18 Hz, cca/fire ~45 Hz) — the render still runs
+    every frame, only the simulation advances on the gate.
+  - Per-run variety: each CA re-rolls palette/params and reseeds on extinction/stasis/age
+    (`life` reseeds on death or stable population; `cca`/`fire`/`reaction` on an age cap).
+  - **Palettes are now 12** (`NUM_PALETTES`): index 11 = `PAL_FIRE`, a bespoke *non-cyclic*
+    forest-fire heat ramp (empty→green tree→red/orange/yellow/white ember). Indices 0–10
+    unchanged. `reaction` runs in `float` (the S3 has an FPU), 10 micro-steps/frame.
 
 ### Roadmap
 - **IMU tilt (next):** onboard QMI8658 on I2C (pins ~IO43/IO44 — confirm SDA/SCL order
